@@ -6,10 +6,10 @@ import os
 import datetime
 from textblob import TextBlob
 
-# --- Configuracion ---
+# --- Configuración ---
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 QUERY = st.sidebar.text_input("🔍 Buscar acción o criptomoneda", value="Bitcoin")
-NUM_RESULTS = 20
+NUM_RESULTS = 50
 SENTIMENT_SPIKE_THRESHOLD = 0.3  # Umbral para alertas
 
 st.title("📈 Detector de Picos de Sentimiento en Tiempo Real")
@@ -48,6 +48,9 @@ def build_dataframe():
     news_data = fetch_news(QUERY)
     reddit_data = fetch_reddit(QUERY)
 
+    if not reddit_data:
+        st.info("⚠️ No se encontraron resultados recientes en Reddit para esta búsqueda.")
+
     entries = []
     for item in news_data:
         entries.append({
@@ -75,9 +78,19 @@ def build_dataframe():
 
 df = build_dataframe()
 
-# Calcular promedio de sentimiento por hora/minuto
-df["minute"] = df["published"].dt.floor("min")
-sentiment_over_time = df.groupby("minute")["sentiment"].mean().reset_index()
+# Mostrar todos los puntos (uno por artículo)
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    x=df["published"],
+    y=df["sentiment"],
+    mode="markers",
+    marker=dict(color="blue", size=6),
+    name="Cada titular"
+))
+
+# Calcular promedio de sentimiento por bloques de 5 minutos
+df["interval"] = df["published"].dt.floor("5min")
+sentiment_over_time = df.groupby("interval")["sentiment"].mean().reset_index()
 sentiment_over_time["change"] = sentiment_over_time["sentiment"].diff()
 
 # Detectar picos
@@ -87,19 +100,23 @@ spikes = sentiment_over_time[abs(sentiment_over_time["change"]) > SENTIMENT_SPIK
 if not spikes.empty:
     for _, row in spikes.iterrows():
         if row["change"] > 0:
-            st.success(f"📈 Sentimiento subió bruscamente a las {row['minute'].strftime('%H:%M')}")
+            st.success(f"📈 Sentimiento subió bruscamente a las {row['interval'].strftime('%H:%M')}")
         else:
-            st.error(f"📉 Sentimiento bajó bruscamente a las {row['minute'].strftime('%H:%M')}")
+            st.error(f"📉 Sentimiento bajó bruscamente a las {row['interval'].strftime('%H:%M')}")
 
-# --- GRAFICO ---
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=sentiment_over_time["minute"], y=sentiment_over_time["sentiment"],
-                         mode="lines+markers", name="Sentimiento"))
+# Línea de evolución del sentimiento (promedio)
+fig.add_trace(go.Scatter(
+    x=sentiment_over_time["interval"],
+    y=sentiment_over_time["sentiment"],
+    mode="lines+markers",
+    name="Promedio 5min",
+    line=dict(color="orange")
+))
 
 # Anotar titulares en picos
 for _, row in spikes.iterrows():
-    spike_time = row["minute"]
-    related_titles = df[df["minute"] == spike_time].sort_values("sentiment", ascending=False).head(2)
+    spike_time = row["interval"]
+    related_titles = df[df["interval"] == spike_time].sort_values("sentiment", ascending=False).head(2)
     for _, article in related_titles.iterrows():
         fig.add_trace(go.Scatter(
             x=[spike_time],
@@ -117,3 +134,4 @@ st.plotly_chart(fig, use_container_width=True)
 # --- Mostrar tabla de titulares ---
 st.subheader("📰 Titulares recientes")
 st.dataframe(df[["published", "source", "title", "sentiment"]].sort_values("published", ascending=False), use_container_width=True)
+
