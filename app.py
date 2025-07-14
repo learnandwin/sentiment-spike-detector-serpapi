@@ -1,84 +1,80 @@
 import streamlit as st
-import pandas as pd
-from serpapi import GoogleSearch
-from textblob import TextBlob
-import plotly.express as px
+import requests
 import datetime
+import pandas as pd
+import plotly.express as px
+import os
 
-st.set_page_config(page_title="📈 Real-Time Sentiment Spike Detector", layout="centered")
+st.set_page_config(page_title="Sentiment Spike Detector", layout="wide")
+
 st.title("📈 Real-Time Sentiment Spike Detector")
 st.markdown("Monitor sentiment from **Reddit** and **Google News** about **stocks** or **crypto**, using SerpAPI.")
 
-query = st.text_input("🔍 Enter a stock or crypto keyword", value="Bitcoin")
+# API key from Streamlit secrets
+api_key = os.getenv("SERPAPI_API_KEY") or st.secrets.get("SERPAPI_API_KEY")
+
+query = st.text_input("🔍 Enter a stock or crypto keyword", "Bitcoin")
+
+if not api_key:
+    st.error("❌ API key not found. Please set SERPAPI_API_KEY in your Streamlit secrets.")
+    st.stop()
 
 @st.cache_data(ttl=300)
-def fetch_google_news(query):
+def fetch_results(source):
     params = {
-        "engine": "google_news",
         "q": query,
-        "api_key": st.secrets["SERPAPI_KEY"],
-        "hl": "en"
+        "api_key": api_key,
+        "num": "50"
     }
-    search = GoogleSearch(params)
-    return search.get("news_results", [])
 
-@st.cache_data(ttl=300)
-def fetch_reddit(query):
-    params = {
-        "engine": "reddit",
-        "q": query,
-        "api_key": st.secrets["SERPAPI_KEY"]
-    }
-    search = GoogleSearch(params)
-    return search.get("organic_results", [])
-
-def get_sentiment(text):
-    blob = TextBlob(text)
-    return round(blob.sentiment.polarity, 2)
-
-def detect_spikes(scores, threshold=0.8):
-    spikes = []
-    for i in range(1, len(scores)):
-        diff = abs(scores[i] - scores[i - 1])
-        if diff >= threshold:
-            spikes.append(i)
-    return spikes
-
-if query:
-    st.info("Collecting real-time sentiment data...")
-
-    google_results = fetch_google_news(query)
-    reddit_results = fetch_reddit(query)
-
-    all_data = []
-    now = datetime.datetime.now()
-
-    for res in google_results:
-        title = res.get("title", "")
-        score = get_sentiment(title)
-        all_data.append({"title": title, "score": score, "source": "Google News", "time": now})
-
-    for res in reddit_results:
-        title = res.get("title", "")
-        score = get_sentiment(title)
-        all_data.append({"title": title, "score": score, "source": "Reddit", "time": now})
-
-    if not all_data:
-        st.warning("No data found. Try a different keyword.")
+    if source == "news":
+        url = "https://serpapi.com/search.json?engine=google_news"
+    elif source == "reddit":
+        url = "https://serpapi.com/search.json?engine=reddit"
     else:
-        df = pd.DataFrame(all_data)
+        return []
 
-        spikes = detect_spikes(df["score"].tolist())
+    response = requests.get(url, params=params)
+    data = response.json()
+    return data.get("news_results" if source == "news" else "organic_results", [])
 
-        fig = px.line(df, x="time", y="score", color="source", markers=True, title=f"Sentiment Trend for '{query}'")
-        st.plotly_chart(fig, use_container_width=True)
+def mock_sentiment(text):
+    score = sum([1 if w in text.lower() else -1 for w in ["bullish", "buy", "surge", "moon", "gain"]])
+    score -= sum([1 if w in text.lower() else -1 for w in ["crash", "sell", "bearish", "drop", "loss"]])
+    return max(-1, min(1, score))
 
-        if spikes:
-            st.warning("⚠️ Sentiment spike detected!")
-            for i in spikes:
-                spike_row = df.iloc[i]
-                st.markdown(f"**{spike_row['source']}** spike at **{spike_row['time'].strftime('%H:%M:%S')}**: {spike_row['title']}")
+# Fetch and process
+news = fetch_results("news")
+reddit = fetch_results("reddit")
 
-        with st.expander("📰 View all headlines"):
-            for row in all_data:
-                st.write(f"• ({row['source']}) {row['title']} — Sentiment: {row['score']}")
+def process(results, source):
+    rows = []
+    for r in results:
+        text = r.get("title") + " " + r.get("snippet", "")
+        date_str = r.get("date") or r.get("published_date") or ""
+        try:
+            time = pd.to_datetime(date_str)
+        except:
+            time = pd.Timestamp.now()
+        rows.append({
+            "source": source,
+            "text": text,
+            "sentiment": mock_sentiment(text),
+            "time": time
+        })
+    return rows
+
+df = pd.DataFrame(process(news, "Google News") + process(reddit, "Reddit"))
+df = df.sort_values("time")
+
+# Plot
+if df.empty:
+    st.warning("No data found. Try another keyword.")
+else:
+    fig = px.line(df, x="time", y="sentiment", color="source", markers=True,
+                  title=f"Sentiment Trend for '{query}'", labels={"sentiment": "Sentiment Score"})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Optional: display raw data
+    with st.expander("See raw data"):
+        st.dataframe(df[["time", "source", "text", "sentiment"]])
